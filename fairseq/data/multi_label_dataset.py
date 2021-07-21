@@ -74,7 +74,7 @@ def collate(
             #         unsorted_prev_output_tokens += [curr_prev_outs]
 
             target_list_of_lists    = [[] for _ in range(len(samples))]
-            target_per_src          = []
+            target_per_src          = [] # List of number of labels per src input
             # Sort target according to sort_order TODO: Verify if this is correct way to sort
             for new_idx, orig_idx in enumerate(sort_order):
                 target_list_of_lists[new_idx] = unsorted_target[orig_idx]
@@ -151,11 +151,6 @@ def collate(
         embed()
         raise e
 
-    # from IPython import embed
-    # print("Just before batch creation")
-    # embed()
-    # input("")
-
     batch = {
         "id": id,
         "nsentences": len(samples),
@@ -227,43 +222,6 @@ class MultiLabelDataset(FairseqDataset):
         self.shuffle = shuffle
         self.input_feeding = input_feeding
         self.eos = src_dict.eos()
-
-        # if num_buckets > 0:
-        #     raise NotImplementedError
-        #     # TODO: See why do we need num_buckets --> I think this is useful only for TPUs
-        #     from fairseq.data import BucketPadLengthDataset
-        #
-        #     self.src = BucketPadLengthDataset(
-        #         self.src,
-        #         sizes=self.src_sizes,
-        #         num_buckets=num_buckets,
-        #         pad_idx=self.src_dict.pad(),
-        #         left_pad=self.left_pad_source,
-        #     )
-        #     self.src_sizes = self.src.sizes
-        #     logger.info("bucketing source lengths: {}".format(list(self.src.buckets)))
-        #     if self.tgt is not None:
-        #         self.tgt = BucketPadLengthDataset(
-        #             self.tgt,
-        #             sizes=self.tgt_sizes,
-        #             num_buckets=num_buckets,
-        #             pad_idx=self.tgt_dict.pad(),
-        #             left_pad=self.left_pad_target,
-        #         )
-        #         self.tgt_sizes = self.tgt.sizes
-        #         logger.info(
-        #             "bucketing target lengths: {}".format(list(self.tgt.buckets))
-        #         )
-        #
-        #     # determine bucket sizes using self.num_tokens, which will return
-        #     # the padded lengths (thanks to BucketPadLengthDataset)
-        #     num_tokens = np.vectorize(self.num_tokens, otypes=[np.compat.long])
-        #     self.bucketed_num_tokens = num_tokens(np.arange(len(self.src)))
-        #     self.buckets = [
-        #         (None, num_tokens) for num_tokens in np.unique(self.bucketed_num_tokens)
-        #     ]
-        # else:
-        #     self.buckets = None
 
         self.buckets = None
         self.pad_to_multiple = pad_to_multiple

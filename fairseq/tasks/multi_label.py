@@ -65,7 +65,7 @@ def load_multilabel_dataset(
         prefix + tgt, tgt_dict, dataset_impl
     )
 
-    # Make sure that the dataset is in raw formrat when  reading here
+    # Make sure that the dataset is in raw format when  reading here
     # Now tgt dataset will have .lines variable that will store raw lines
     # Iterate over it and use dictionary to convert them
     # Then make sure it is used correctly for the task
@@ -79,9 +79,9 @@ def load_multilabel_dataset(
         new_tokens_list = []
         for curr_label_list in tqdm(tgt_dataset.lines):
             curr_tokens_list = []
-            for curr_label in curr_label_list:
+            for curr_label in json.loads(curr_label_list):
                 tokens = tgt_dict.encode_line(
-                    curr_label,
+                    line=curr_label,
                     add_if_not_exist=False,
                     append_eos=True,
                     reverse_order=False,
