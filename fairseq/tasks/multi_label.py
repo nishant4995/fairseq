@@ -77,8 +77,10 @@ def load_multilabel_dataset(
     try:
         from tqdm import tqdm
         new_tokens_list = []
+        new_sizes = []
         for curr_label_list in tqdm(tgt_dataset.lines):
             curr_tokens_list = []
+            curr_size = 0
             for curr_label in json.loads(curr_label_list):
                 tokens = tgt_dict.encode_line(
                     line=curr_label,
@@ -87,9 +89,12 @@ def load_multilabel_dataset(
                     reverse_order=False,
                 ).long()
                 curr_tokens_list += [tokens]
+                curr_size += len(tokens)
             new_tokens_list += [curr_tokens_list]
+            new_sizes += [curr_size]
 
         tgt_dataset.tokens_list = new_tokens_list
+        tgt_dataset.sizes = np.array(new_sizes)
     except Exception as e:
         from IPython import embed
         embed()

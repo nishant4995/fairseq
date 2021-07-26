@@ -13,7 +13,7 @@ from fairseq.data import FairseqDataset, data_utils
 logger = logging.getLogger(__name__)
 
 
-def collate(
+def collate_old(
     samples,
     pad_idx,
     eos_idx,
@@ -158,6 +158,201 @@ def collate(
         "net_input": {"src_tokens": src_tokens, "src_lengths": src_lengths,},
         "target": target_tensor,
         "target_per_src": target_per_src,
+    }
+    if prev_output_tokens is not None:
+        # batch["net_input"]["prev_output_tokens"] = prev_output_tokens.index_select(0, sort_order)
+        batch["net_input"]["prev_output_tokens"] = prev_output_tokens
+
+    return batch
+
+from Autoregressive_XMR.models.trie import Trie
+# TODO: Move this to pre-processing step
+def get_parallel_tgt_tokens_list(target_list, pad_token, prll_pad_len, seq_pad_len):
+    # target_list : shape: number_of_targets x [ variable length of each target]
+    # parallel_tgt_tokens : number_of_targets x [ variable length of each target] x [variable length of parallel token list for each token/time_step]
+    try:
+        parallel_tgt_tokens_list = []
+        target_list = [tgt.numpy().tolist() for tgt in target_list]
+        tgt_trie = Trie([tgt for tgt in target_list])
+
+        pad_token_list = [pad_token]*prll_pad_len
+        for tgt in target_list:
+            # For each target, find out list of other tokens that are also valid outputs
+            parallel_tgt_tokens = []
+            curr_tgt_trie = tgt_trie
+            for i, token in enumerate(tgt): # TODO: Optimize this or pre-compute this
+                if seq_pad_len!=-1 and i >= seq_pad_len: break
+
+                valid_next_tokens = curr_tgt_trie.get(tgt[:i])
+                if prll_pad_len > len(valid_next_tokens):
+                    valid_next_tokens += pad_token_list[:prll_pad_len - len(valid_next_tokens)]
+
+                parallel_tgt_tokens.append(valid_next_tokens)
+
+            if seq_pad_len > 0:
+                parallel_tgt_tokens += [pad_token_list]*(seq_pad_len - len(parallel_tgt_tokens))
+
+            parallel_tgt_tokens_list.append(parallel_tgt_tokens)
+
+        return parallel_tgt_tokens_list
+    except Exception as e:
+        from IPython import embed
+        embed()
+        raise e
+
+
+def get_list_from_list_of_lists(list_of_lists):
+    return [x for x_list in list_of_lists for x in x_list]  # Convert list of list to a single list
+
+
+def collate(
+    samples,
+    pad_idx,
+    eos_idx,
+    left_pad_source=True,
+    left_pad_target=False,
+    input_feeding=True,
+    pad_to_length=None,
+    pad_to_multiple=1,
+):
+    # raise NotImplementedError
+    if len(samples) == 0:
+        return {}
+
+    def merge(key, left_pad, move_eos_to_beginning=False, pad_to_length=None):
+        return data_utils.collate_tokens(
+            [s[key] for s in samples],
+            pad_idx,
+            eos_idx,
+            left_pad,
+            move_eos_to_beginning,
+            pad_to_length=pad_to_length,
+            pad_to_multiple=pad_to_multiple,
+        )
+
+    try:
+        id = torch.LongTensor([s["id"] for s in samples])
+        src_tokens = merge(
+            key="source",
+            left_pad=left_pad_source,
+            pad_to_length=pad_to_length["source"] if pad_to_length is not None else None,
+        )
+        # sort by descending source length
+        src_lengths = torch.LongTensor(
+            [s["source"].ne(pad_idx).long().sum() for s in samples]
+        )
+        src_lengths, sort_order = src_lengths.sort(descending=True)
+        id = id.index_select(0, sort_order)
+        src_tokens = src_tokens.index_select(0, sort_order)
+
+        prev_output_tokens = None
+        target_tensor = None
+        target_per_src = None
+
+        # parallel_tgt_tokens_list = None
+        # parallel_tgt_tokens_list_wo_pad = None
+        parallel_tgt_tokens_list_2 = None
+        if samples[0].get("target", None) is not None:
+            unsorted_target = [s["target"] for s in samples]
+
+            target_list_of_lists    = [[] for _ in range(len(samples))]
+            target_per_src          = [] # List of number of labels per src input
+            # Sort target according to sort_order
+            for new_idx, orig_idx in enumerate(sort_order):
+                target_list_of_lists[new_idx] = unsorted_target[orig_idx]
+                target_per_src.append(len(target_list_of_lists[new_idx]))
+
+            target_list = get_list_from_list_of_lists(target_list_of_lists)  # Convert list of list to a single list
+            target_tensor = data_utils.collate_tokens(
+                values=target_list,  # [List of 1-D tensors],
+                pad_idx=pad_idx,
+                eos_idx=eos_idx,
+                left_pad=left_pad_target,
+                move_eos_to_beginning=False,
+                pad_to_length=pad_to_length["target"] if pad_to_length is not None else None,
+                pad_to_multiple=pad_to_multiple,
+                pad_to_bsz=None)
+
+            new_src_tokens = []
+            for i, n_tgt in enumerate(target_per_src):
+                new_src_tokens += [torch.clone(src_tokens[i]) for _ in
+                                   range(n_tgt)]  # Create n_tgt copies of src_tokens[i]
+            src_tokens = torch.vstack(new_src_tokens)
+
+            tgt_lengths = torch.LongTensor(
+                [temp_tgt.ne(pad_idx).long().sum() for temp_tgt in target_list]
+            )
+            ntokens = tgt_lengths.sum().item()
+
+
+
+            # For multi-label loss
+
+            # seq_pad_len = max(v.size(0) for v in target_list)
+            # seq_pad_len = seq_pad_len if pad_to_length is None or pad_to_length["target"] is None \
+            #             else max(seq_pad_len, pad_to_length["target"])
+
+            pad_len = max(target_per_src) if len(target_per_src) > 0 else 0
+
+            # parallel_tgt_tokens_list_of_lists = []
+            # for curr_target_list in target_list_of_lists:
+            #     parallel_tgt_tokens_list = get_parallel_tgt_tokens_list(target_list=curr_target_list, pad_token=pad_idx,
+            #                                                             prll_pad_len=pad_len, seq_pad_len=seq_pad_len)
+            #     parallel_tgt_tokens_list_of_lists.append(parallel_tgt_tokens_list)
+
+            ###### For hybrid loss func where we consider multi-label nature upto 2-tokens only
+            parallel_tgt_tokens_list_of_lists_2 = []
+            for curr_target_list in target_list_of_lists:
+                parallel_tgt_tokens_list = get_parallel_tgt_tokens_list(target_list=curr_target_list, pad_token=pad_idx,
+                                                                        prll_pad_len=pad_len, seq_pad_len=2)
+                parallel_tgt_tokens_list_of_lists_2.append(parallel_tgt_tokens_list)
+
+            ###### For debugging padding of tensors - this one is used in a func that uses loops
+            # parallel_tgt_tokens_list_of_lists_wo_pad = []
+            # for curr_target_list in target_list_of_lists:
+            #     parallel_tgt_tokens_list = get_parallel_tgt_tokens_list(target_list=curr_target_list, pad_token=pad_idx,
+            #                                                             prll_pad_len=0, seq_pad_len=-1)
+            #     parallel_tgt_tokens_list_of_lists_wo_pad.append(parallel_tgt_tokens_list)
+            #
+            # parallel_tgt_tokens_list = get_list_from_list_of_lists(parallel_tgt_tokens_list_of_lists)
+            # parallel_tgt_tokens_list_wo_pad = get_list_from_list_of_lists(parallel_tgt_tokens_list_of_lists_wo_pad)  # Convert list of list to a single list
+            parallel_tgt_tokens_list_2 = get_list_from_list_of_lists(parallel_tgt_tokens_list_of_lists_2)  # Convert list of list to a single list
+
+
+
+
+            if input_feeding:
+                prev_output_tokens = data_utils.collate_tokens(
+                                    values=target_list,  # [List of 1-D tensors],
+                                    pad_idx=pad_idx,
+                                    eos_idx=eos_idx,
+                                    left_pad=left_pad_target,
+                                    move_eos_to_beginning=True, # Move eos token to beginning to create prev output tokens for given target
+                                    pad_to_length=pad_to_length["target"] if pad_to_length is not None else None,
+                                    pad_to_multiple=pad_to_multiple,
+                                    pad_to_bsz=None)
+
+
+
+
+        else:
+            ntokens = src_lengths.sum().item()
+
+    except Exception as e:
+        from IPython import embed
+        embed()
+        raise e
+
+    batch = {
+        "id": id,
+        "nsentences": len(samples),
+        "ntokens": ntokens,
+        "net_input": {"src_tokens": src_tokens, "src_lengths": src_lengths,},
+        "target": target_tensor,
+        "target_per_src": target_per_src,
+        # "parallel_target_tokens": parallel_tgt_tokens_list,
+        # "parallel_target_tokens_wo_pad": parallel_tgt_tokens_list_wo_pad,
+        "parallel_target_tokens_2": parallel_tgt_tokens_list_2,
     }
     if prev_output_tokens is not None:
         # batch["net_input"]["prev_output_tokens"] = prev_output_tokens.index_select(0, sort_order)
