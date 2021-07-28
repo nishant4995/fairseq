@@ -29,8 +29,9 @@ class MultiLabelSmoothedCrossEntropyCriterionConfig(FairseqDataclass):
         default="cross_ent",
         metadata={"help": "loss function to compute token level multi-label loss"},
     )
+    # TODO: This parameter is also defined in dataclass of MultiLabelDataset class. Mayve remove duplicate
     ml_loss_timestep: int = field(
-        default=1,
+        default=0,
         metadata={"help": "Use multi-label loss for time step < ml_loss_timestep and nll loss thereafter"},
     )
 
@@ -57,7 +58,7 @@ def label_smoothed_cross_ent_loss(lprobs, target, epsilon):
         raise e
 
 
-def multi_label_smoothed_cross_ent_loss_v0(scores, target, use_sigmoid, n_tgt_per_src, epsilon, reduce=True):
+def multi_label_loss_v0(scores, target, use_sigmoid, n_tgt_per_src, epsilon, reduce=True):
     try:
         if target.dim() == scores.dim() - 1:
             target = target.unsqueeze(-1)
@@ -88,7 +89,7 @@ def multi_label_smoothed_cross_ent_loss_v0(scores, target, use_sigmoid, n_tgt_pe
         raise e
 
 
-def multi_label_smoothed_cross_ent_loss(scores, target, n_tgt_per_src, **loss_opts):
+def multi_label_loss(scores, target, n_tgt_per_src, **loss_opts):
     """
     sco
     """
@@ -103,9 +104,9 @@ def multi_label_smoothed_cross_ent_loss(scores, target, n_tgt_per_src, **loss_op
             curr_scores = scores[total_n_labels: total_n_labels+n_labels]
             curr_target = target[total_n_labels: total_n_labels+n_labels]
 
-            loss, _ = multi_label_smoothed_cross_ent_loss_per_data_point(scores=curr_scores,
-                                                                         target=curr_target,
-                                                                         **loss_opts)
+            loss, _ = multi_label_loss_per_data_point(scores=curr_scores,
+                                                      target=curr_target,
+                                                      **loss_opts)
             loss_per_dtpoint += [loss]
             total_n_labels = total_n_labels + n_labels
             # print(f"--------------------------------------------------------------------------------------------------------\n\n")
@@ -117,7 +118,7 @@ def multi_label_smoothed_cross_ent_loss(scores, target, n_tgt_per_src, **loss_op
         raise e
 
 
-def multi_label_smoothed_cross_ent_loss_per_data_point(scores, target, **loss_opts):
+def multi_label_loss_per_data_point(scores, target, **loss_opts):
     try:
         # target : shape : (number of labels ) x max_seq_len
         # scores : shape : (number of labels ) x max_seq_len x vocab_size
@@ -198,7 +199,7 @@ def multi_label_smoothed_cross_ent_loss_per_data_point(scores, target, **loss_op
                 #     raise Exception(f"\n\n curr_scores contain more than one unique array , curr_scores.shape = {curr_scores.shape} {curr_scores}\n\n")
                 # curr_scores = curr_scores[0].view(-1) # Shape : vocab_size
 
-                loss = ml_ce_helper(scores=curr_scores, target=curr_target, **loss_opts)
+                loss = ml_loss_helper(scores=curr_scores, target=curr_target, **loss_opts)
                 loss_per_uniq_pref += [loss]
 
             if len(loss_per_uniq_pref) > 0:
@@ -211,7 +212,7 @@ def multi_label_smoothed_cross_ent_loss_per_data_point(scores, target, **loss_op
         raise e
 
 
-def multi_label_smoothed_cross_ent_loss_per_data_point_t_0(scores, target, **loss_opts):
+def multi_label_loss_per_data_point_t_0(scores, target, **loss_opts):
     # This is optimized to compute loss for first tokens of target sequences
     try:
         # target : shape : (number of labels ) x 1
@@ -225,7 +226,7 @@ def multi_label_smoothed_cross_ent_loss_per_data_point_t_0(scores, target, **los
         # assert curr_target.shape == (target.shape[0],)
         # assert curr_scores.shape == (scores.shape[0], scores.shape[-1])
 
-        loss = ml_ce_helper(scores=curr_scores, target=curr_target, **loss_opts)
+        loss = ml_loss_helper(scores=curr_scores, target=curr_target, **loss_opts)
 
         return loss, loss
     except Exception as e:
@@ -233,7 +234,7 @@ def multi_label_smoothed_cross_ent_loss_per_data_point_t_0(scores, target, **los
         raise e
 
 
-def ml_ce_helper(scores, target, **loss_opts):
+def ml_loss_helper(scores, target, **loss_opts):
     try:
         # TODO: See if this can be batched
         # TODO: Implement some label smoothening
@@ -306,14 +307,14 @@ def hybrid_multi_label_loss_func(scores, target, n_tgt_per_src, **loss_opts):
         if ml_loss_timestep == 0:
             ml_loss = 0.
         elif ml_loss_timestep == 1:
-            ml_loss, _ = multi_label_smoothed_cross_ent_loss_per_data_point_t_0(scores=ml_scores, target=ml_target,
-                                                                                n_tgt_per_src=n_tgt_per_src,
-                                                                                **loss_opts)
+            ml_loss, _ = multi_label_loss_per_data_point_t_0(scores=ml_scores, target=ml_target,
+                                                             n_tgt_per_src=n_tgt_per_src,
+                                                             **loss_opts)
             # print("Multi-label loss = {} computed in time {:.4f}".format(ml_loss, time.time() - t1))
         else:
-            ml_loss, _ = multi_label_smoothed_cross_ent_loss_per_data_point(scores=ml_scores, target=ml_target,
-                                                                            n_tgt_per_src=n_tgt_per_src,
-                                                                            **loss_opts)
+            ml_loss, _ = multi_label_loss_per_data_point(scores=ml_scores, target=ml_target,
+                                                         n_tgt_per_src=n_tgt_per_src,
+                                                         **loss_opts)
             # print("Multi-label loss = {} computed in time {:.4f}".format(ml_loss, time.time() - t1))
 
 
@@ -406,25 +407,20 @@ def label_smoothed_cross_ent_loss_w_multi_targets_v1(scores, target, epsilon, pa
 
 def label_smoothed_cross_ent_loss_w_multi_targets(scores, target, epsilon, parallel_targets):
     # target shape : num_tgt x max_seq_len (x 1) : Last dim is added after target = target.unsqueeze(-1)
+    # parallel_targets : num_tgt x max_seq_len x num_prll_token_at_each_pos
     try:
         if target.dim() == scores.dim() - 1:
             target = target.unsqueeze(-1)
 
         pos_loss    = -scores.gather(dim=-1, index=target)
 
-
         prll_tgt_pos_one_hot    = torch.nn.functional.one_hot(input=torch.LongTensor(parallel_targets).to(scores.device),
                                                               num_classes=scores.shape[-1]).sum(dim=-2)
-        # print(prll_tgt_pos_one_hot.shape)
-        # prll_tgt_pos_one_hot    = prll_tgt_pos_one_hot.sum(dim=-2)
-        # print(prll_tgt_pos_one_hot.shape)
         prll_tgt_pos_one_hot[prll_tgt_pos_one_hot > 1] = 1
-        # print()
-
+        # prll_tgt_pos_one_hot.shape == num_tgt x max_seq_len x vocab_size
         assert prll_tgt_pos_one_hot.shape == scores.shape
 
         pos_one_hot = prll_tgt_pos_one_hot.to(scores)
-
         neg_one_hot = 1 - pos_one_hot  # (1, vocab_size)
 
         neg_scores  = torch.multiply(scores, neg_one_hot)
@@ -458,33 +454,37 @@ def hybrid_multi_label_loss_func_w_multi_targets(scores, target, parallel_target
         # For time_step < ml_loss_timestep, calculate multilabel loss, and then calculate nll loss
 
         max_t = target.shape[1]
-        # ml_loss_timestep = loss_opts.get("ml_loss_timestep", 1)
-
-
         if ml_loss_timestep == 0:
+            smooth_ml_loss = 0.
             ml_loss = 0.
         else:
             # ml_scores = scores[:, :ml_loss_timestep, :]
             # ml_target = target[:, :ml_loss_timestep]
-            ml_loss, _ = label_smoothed_cross_ent_loss_w_multi_targets(scores=scores[:, :ml_loss_timestep, :],
-                                                                       target=target[:, :ml_loss_timestep],
-                                                                       parallel_targets=parallel_targets,
-                                                                       **loss_opts)
 
+            smooth_ml_loss, ml_loss = label_smoothed_cross_ent_loss_w_multi_targets(scores=scores[:, :ml_loss_timestep, :],
+                                                                                    target=target[:, :ml_loss_timestep],
+                                                                                    parallel_targets=parallel_targets,
+                                                                                    **loss_opts)
+            # lprobs = F.log_softmax(ml_scores, dim=-1)
+            # smooth_ml_loss_2, ml_loss_2 = label_smoothed_cross_ent_loss(lprobs=lprobs,
+            #                                                             target=ml_target,
+            #                                                             epsilon=loss_opts.get("epsilon", 0.0))
+            # print(smooth_ml_loss, smooth_ml_loss_2)
+            # print(ml_loss, ml_loss_2)
+            # print()
+            # embed()
 
         nll_lprobs = F.log_softmax(scores[:, ml_loss_timestep:, :], dim=-1)
         nll_target = target[:, ml_loss_timestep:]
 
         epsilon = loss_opts.get("epsilon", 0.0)
-        smooth_loss, nll_loss = label_smoothed_cross_ent_loss(lprobs=nll_lprobs, target=nll_target,
+        smooth_nll_loss, nll_loss = label_smoothed_cross_ent_loss(lprobs=nll_lprobs, target=nll_target,
                                                               epsilon=epsilon)
 
-        final_smooth_loss = (ml_loss * ml_loss_timestep + smooth_loss * (max_t - ml_loss_timestep))/max_t
-        final_loss = (ml_loss * ml_loss_timestep + nll_loss * (max_t - ml_loss_timestep))/max_t
+        final_ml_loss       = (ml_loss * ml_loss_timestep        + nll_loss * (max_t - ml_loss_timestep))/max_t
+        final_smooth_loss   = (smooth_ml_loss * ml_loss_timestep + smooth_nll_loss * (max_t - ml_loss_timestep))/max_t
 
-        # print(f"Computed loss {ml_loss} and {smooth_loss} ({nll_loss}). Final loss is {final_smooth_loss} ({final_loss})")
-        # embed()
-        return final_smooth_loss, final_loss, ml_loss, nll_loss
+        return final_smooth_loss, final_ml_loss, ml_loss, nll_loss
     except Exception as e:
         embed()
         raise e
@@ -587,11 +587,18 @@ class MultiLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         # lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
         scores = self.get_scores(net_output=net_output)
         target = sample["target"]
-        n_tgt_per_src = sample["target_per_src"]
+        # n_tgt_per_src = sample["target_per_src"]
         # parallel_tgt_tokens_list_of_lists_wo_pad = sample["parallel_target_tokens_wo_pad"]
         # parallel_tgt_tokens_list_of_lists = sample["parallel_target_tokens"]
-        parallel_tgt_tokens_list_of_lists_2 = sample["parallel_target_tokens_2"]
+        parallel_tgt_tokens_list_of_lists = sample["parallel_target_tokens"]
         assert reduce
+
+        losses = hybrid_multi_label_loss_func_w_multi_targets(scores=scores,
+                                                              target=target,
+                                                              parallel_targets=parallel_tgt_tokens_list_of_lists,
+                                                              ml_loss_timestep=self.ml_loss_timestep,
+                                                              epsilon=self.epsilon)
+        loss, loss_wo_smooth, ml_loss, nll_loss = losses
         # start1 = time.time()
         # loss, loss_wo_smooth, ml_loss, nll_loss = hybrid_multi_label_loss_func(
         #     scores=scores,
@@ -628,11 +635,11 @@ class MultiLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
 
 
         # start5 = time.time()
-        loss, loss_wo_smooth, ml_loss, nll_loss = hybrid_multi_label_loss_func_w_multi_targets(scores=scores,
-                                                                              target=target,
-                                                                              parallel_targets=parallel_tgt_tokens_list_of_lists_2,
-                                                                              ml_loss_timestep=2,
-                                                                              epsilon=self.epsilon)
+        # loss, loss_wo_smooth, ml_loss, nll_loss = hybrid_multi_label_loss_func_w_multi_targets(scores=scores,
+        #                                                                       target=target,
+        #                                                                       parallel_targets=parallel_tgt_tokens_list_of_lists_2,
+        #                                                                       ml_loss_timestep=2,
+        #                                                                       epsilon=self.epsilon)
         # end5 = time.time()
 
 

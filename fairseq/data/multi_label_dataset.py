@@ -168,8 +168,19 @@ def collate_old(
 from Autoregressive_XMR.models.trie import Trie
 # TODO: Move this to pre-processing step
 def get_parallel_tgt_tokens_list(target_list, pad_token, prll_pad_len, seq_pad_len):
-    # target_list : shape: number_of_targets x [ variable length of each target]
-    # parallel_tgt_tokens : number_of_targets x [ variable length of each target] x [variable length of parallel token list for each token/time_step]
+    """
+    args:
+    target_list ( list of tgt tensors) shape: number_of_targets x [ variable length of each target]
+    pad_token   : int : Index of pad token
+    prll_pad_len : int : Length to pad list of parallel_tokens that is computed for each token position in target.
+    seq_pad_len : int : This is the length used to pad all target sequences of variable len into a 2-D tensor.
+                        If -1, then no padding is done to even out length of each target.
+
+
+    returns:
+    parallel_tgt_tokens : A list of list of lists with shape:
+                        number_of_targets x [ seq_pad_len or variable length of each target] x prll_pad_len
+    """
     try:
         parallel_tgt_tokens_list = []
         target_list = [tgt.numpy().tolist() for tgt in target_list]
@@ -180,12 +191,14 @@ def get_parallel_tgt_tokens_list(target_list, pad_token, prll_pad_len, seq_pad_l
             # For each target, find out list of other tokens that are also valid outputs
             parallel_tgt_tokens = []
             curr_tgt_trie = tgt_trie
-            for i, token in enumerate(tgt): # TODO: Optimize this or pre-compute this
-                if seq_pad_len!=-1 and i >= seq_pad_len: break
+            for i, token in enumerate(tgt):
+                if seq_pad_len != -1 and i >= seq_pad_len: break
 
                 valid_next_tokens = curr_tgt_trie.get(tgt[:i])
-                if prll_pad_len > len(valid_next_tokens):
+                if prll_pad_len >= len(valid_next_tokens):
                     valid_next_tokens += pad_token_list[:prll_pad_len - len(valid_next_tokens)]
+                else:
+                    raise Exception(f"prll_pad_len = {prll_pad_len} is smaller than len(valid_next_tokens) = {len(valid_next_tokens) }")
 
                 parallel_tgt_tokens.append(valid_next_tokens)
 
@@ -214,6 +227,7 @@ def collate(
     input_feeding=True,
     pad_to_length=None,
     pad_to_multiple=1,
+    ml_loss_timestep=0,
 ):
     # raise NotImplementedError
     if len(samples) == 0:
@@ -249,9 +263,7 @@ def collate(
         target_tensor = None
         target_per_src = None
 
-        # parallel_tgt_tokens_list = None
-        # parallel_tgt_tokens_list_wo_pad = None
-        parallel_tgt_tokens_list_2 = None
+        parallel_tgt_tokens_list = None
         if samples[0].get("target", None) is not None:
             unsorted_target = [s["target"] for s in samples]
 
@@ -275,8 +287,7 @@ def collate(
 
             new_src_tokens = []
             for i, n_tgt in enumerate(target_per_src):
-                new_src_tokens += [torch.clone(src_tokens[i]) for _ in
-                                   range(n_tgt)]  # Create n_tgt copies of src_tokens[i]
+                new_src_tokens += [torch.clone(src_tokens[i]) for _ in range(n_tgt)]  # Create n_tgt copies of src_tokens[i]
             src_tokens = torch.vstack(new_src_tokens)
 
             tgt_lengths = torch.LongTensor(
@@ -284,28 +295,32 @@ def collate(
             )
             ntokens = tgt_lengths.sum().item()
 
+            """ 
+            Create list of parallel allowed tokens for positions in target. 
+            This is used for computing loss which is more suitable for multi-label classification 
+            """
 
+            ###### For hybrid loss func where we consider multi-label nature upto 2-tokens only
+            pad_len = max(target_per_src) if len(target_per_src) > 0 else 0
 
-            # For multi-label loss
+            # Need to pad target seq in parallel_tgt_tokens_list upto token idx = ml_loss_timestep
+            # as multi-label style loss is only computed upto this index
+            seq_pad_len = ml_loss_timestep
+            parallel_tgt_tokens_list_of_lists = []
+            for curr_target_list in target_list_of_lists:
+                parallel_tgt_tokens_list = get_parallel_tgt_tokens_list(target_list=curr_target_list, pad_token=pad_idx,
+                                                                        prll_pad_len=pad_len, seq_pad_len=seq_pad_len)
+                parallel_tgt_tokens_list_of_lists.append(parallel_tgt_tokens_list)
+            parallel_tgt_tokens_list = get_list_from_list_of_lists(parallel_tgt_tokens_list_of_lists)  # Convert list of list to a single list
 
             # seq_pad_len = max(v.size(0) for v in target_list)
             # seq_pad_len = seq_pad_len if pad_to_length is None or pad_to_length["target"] is None \
             #             else max(seq_pad_len, pad_to_length["target"])
-
-            pad_len = max(target_per_src) if len(target_per_src) > 0 else 0
-
             # parallel_tgt_tokens_list_of_lists = []
             # for curr_target_list in target_list_of_lists:
             #     parallel_tgt_tokens_list = get_parallel_tgt_tokens_list(target_list=curr_target_list, pad_token=pad_idx,
             #                                                             prll_pad_len=pad_len, seq_pad_len=seq_pad_len)
             #     parallel_tgt_tokens_list_of_lists.append(parallel_tgt_tokens_list)
-
-            ###### For hybrid loss func where we consider multi-label nature upto 2-tokens only
-            parallel_tgt_tokens_list_of_lists_2 = []
-            for curr_target_list in target_list_of_lists:
-                parallel_tgt_tokens_list = get_parallel_tgt_tokens_list(target_list=curr_target_list, pad_token=pad_idx,
-                                                                        prll_pad_len=pad_len, seq_pad_len=2)
-                parallel_tgt_tokens_list_of_lists_2.append(parallel_tgt_tokens_list)
 
             ###### For debugging padding of tensors - this one is used in a func that uses loops
             # parallel_tgt_tokens_list_of_lists_wo_pad = []
@@ -316,10 +331,6 @@ def collate(
             #
             # parallel_tgt_tokens_list = get_list_from_list_of_lists(parallel_tgt_tokens_list_of_lists)
             # parallel_tgt_tokens_list_wo_pad = get_list_from_list_of_lists(parallel_tgt_tokens_list_of_lists_wo_pad)  # Convert list of list to a single list
-            parallel_tgt_tokens_list_2 = get_list_from_list_of_lists(parallel_tgt_tokens_list_of_lists_2)  # Convert list of list to a single list
-
-
-
 
             if input_feeding:
                 prev_output_tokens = data_utils.collate_tokens(
@@ -352,7 +363,7 @@ def collate(
         "target_per_src": target_per_src,
         # "parallel_target_tokens": parallel_tgt_tokens_list,
         # "parallel_target_tokens_wo_pad": parallel_tgt_tokens_list_wo_pad,
-        "parallel_target_tokens_2": parallel_tgt_tokens_list_2,
+        "parallel_target_tokens": parallel_tgt_tokens_list,
     }
     if prev_output_tokens is not None:
         # batch["net_input"]["prev_output_tokens"] = prev_output_tokens.index_select(0, sort_order)
@@ -394,6 +405,7 @@ class MultiLabelDataset(FairseqDataset):
         shuffle=True,
         input_feeding=True,
         pad_to_multiple=1,
+        ml_loss_timestep=0,
     ):
         if tgt_dict is not None:
             assert src_dict.pad() == tgt_dict.pad()
@@ -420,6 +432,7 @@ class MultiLabelDataset(FairseqDataset):
 
         self.buckets = None
         self.pad_to_multiple = pad_to_multiple
+        self.ml_loss_timestep = ml_loss_timestep
 
     def get_batch_shapes(self):
         return self.buckets
@@ -485,6 +498,7 @@ class MultiLabelDataset(FairseqDataset):
             input_feeding=self.input_feeding,
             pad_to_length=pad_to_length,
             pad_to_multiple=self.pad_to_multiple,
+            ml_loss_timestep=self.ml_loss_timestep
         )
         return res
 

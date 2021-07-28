@@ -41,6 +41,7 @@ def load_multilabel_dataset(
     left_pad_target,
     shuffle=True,
     pad_to_multiple=1,
+    ml_loss_timestep=0,
 ):
     def split_exists(split, src, tgt, lang, data_path):
         filename = os.path.join(data_path, "{}.{}-{}.{}".format(split, src, tgt, lang))
@@ -113,6 +114,7 @@ def load_multilabel_dataset(
         left_pad_target=left_pad_target,
         shuffle=shuffle,
         pad_to_multiple=pad_to_multiple,
+        ml_loss_timestep=ml_loss_timestep,
     )
 
 
@@ -154,6 +156,10 @@ class MultiLabelConfig(FairseqDataclass):
     )
     truncate_source: bool = field(
         default=False, metadata={"help": "truncate source to max-source-positions"}
+    )
+    ml_loss_timestep: int = field(
+        default=0,
+        metadata={"help": "Use multi-label loss for time step < ml_loss_timestep and nll loss thereafter"},
     )
     train_subset: str = II("dataset.train_subset")
     dataset_impl: Optional[ChoiceEnum(get_available_dataset_impl())] = II(
@@ -246,6 +252,7 @@ class MultiLabelTask(FairseqTask):
             left_pad_target=self.cfg.left_pad_target,
             shuffle=(split != "test"),
             pad_to_multiple=self.cfg.required_seq_len_multiple,
+            ml_loss_timestep=self.cfg.ml_loss_timestep,
         )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):
