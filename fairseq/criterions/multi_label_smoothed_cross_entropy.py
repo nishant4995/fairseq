@@ -34,6 +34,10 @@ class MultiLabelSmoothedCrossEntropyCriterionConfig(FairseqDataclass):
         default=0,
         metadata={"help": "Use multi-label loss for time step < ml_loss_timestep and nll loss thereafter"},
     )
+    pos_score_thresh: int = field(
+        default=-1,
+        metadata={"help": "Used to threshold pos scores in multi-label loss for time step < ml_loss_timestep"},
+    )
 
 
 def label_smoothed_cross_ent_loss(lprobs, target, epsilon):
@@ -405,14 +409,19 @@ def label_smoothed_cross_ent_loss_w_multi_targets_v1(scores, target, epsilon, pa
         raise e
 
 
-def label_smoothed_cross_ent_loss_w_multi_targets(scores, target, epsilon, parallel_targets):
+def label_smoothed_cross_ent_loss_w_multi_targets(scores, target, epsilon, parallel_targets, pos_score_thresh):
     # target shape : num_tgt x max_seq_len (x 1) : Last dim is added after target = target.unsqueeze(-1)
     # parallel_targets : num_tgt x max_seq_len x num_prll_token_at_each_pos
     try:
         if target.dim() == scores.dim() - 1:
             target = target.unsqueeze(-1)
 
-        pos_loss    = -scores.gather(dim=-1, index=target)
+        pos_scores      = scores.gather(dim=-1, index=target)
+        if pos_score_thresh is not None:
+            pos_scores[pos_scores > pos_score_thresh] = 0 # Use hinge on positive scores
+        pos_loss        = -pos_scores
+
+        curr_pos_one_hot = torch.nn.functional.one_hot(input=target.squeeze(-1), num_classes=scores.shape[-1])
 
         prll_tgt_pos_one_hot    = torch.nn.functional.one_hot(input=torch.LongTensor(parallel_targets).to(scores.device),
                                                               num_classes=scores.shape[-1]).sum(dim=-2)
@@ -420,7 +429,17 @@ def label_smoothed_cross_ent_loss_w_multi_targets(scores, target, epsilon, paral
         # prll_tgt_pos_one_hot.shape == num_tgt x max_seq_len x vocab_size
         assert prll_tgt_pos_one_hot.shape == scores.shape
 
-        pos_one_hot = prll_tgt_pos_one_hot.to(scores)
+        if pos_score_thresh is not None:
+            pos_one_hot = prll_tgt_pos_one_hot.to(scores)
+        else: # Pos scores are not thresholded so include curr_pos indices in logsumexp calc.
+            pos_one_hot = prll_tgt_pos_one_hot.to(scores) - curr_pos_one_hot
+        # print(pos_one_hot.shape)
+        # print(curr_pos_one_hot.shape)
+        # print(prll_tgt_pos_one_hot.shape)
+        # print(pos_one_hot)
+        # print(curr_pos_one_hot)
+        # print(prll_tgt_pos_one_hot)
+        # embed()
         neg_one_hot = 1 - pos_one_hot  # (1, vocab_size)
 
         neg_scores  = torch.multiply(scores, neg_one_hot)
@@ -452,7 +471,7 @@ def hybrid_multi_label_loss_func_w_multi_targets(scores, target, parallel_target
     # target.shape : num_src x max_timestep
     try:
         # For time_step < ml_loss_timestep, calculate multilabel loss, and then calculate nll loss
-
+        epsilon = loss_opts.get("epsilon", 0.0)
         max_t = target.shape[1]
         if ml_loss_timestep == 0:
             smooth_ml_loss = 0.
@@ -461,23 +480,27 @@ def hybrid_multi_label_loss_func_w_multi_targets(scores, target, parallel_target
             # ml_scores = scores[:, :ml_loss_timestep, :]
             # ml_target = target[:, :ml_loss_timestep]
 
+            pos_score_thresh = loss_opts.get("pos_score_thresh", None)
             smooth_ml_loss, ml_loss = label_smoothed_cross_ent_loss_w_multi_targets(scores=scores[:, :ml_loss_timestep, :],
                                                                                     target=target[:, :ml_loss_timestep],
                                                                                     parallel_targets=parallel_targets,
-                                                                                    **loss_opts)
-            # lprobs = F.log_softmax(ml_scores, dim=-1)
-            # smooth_ml_loss_2, ml_loss_2 = label_smoothed_cross_ent_loss(lprobs=lprobs,
-            #                                                             target=ml_target,
-            #                                                             epsilon=loss_opts.get("epsilon", 0.0))
-            # print(smooth_ml_loss, smooth_ml_loss_2)
-            # print(ml_loss, ml_loss_2)
-            # print()
-            # embed()
+                                                                                    pos_score_thresh=pos_score_thresh,
+                                                                                    epsilon=epsilon)
+            # if len(parallel_targets[0][0]) > 1:
+            #     # lprobs = F.log_softmax(scores[:, :ml_loss_timestep, :], dim=-1)
+            #     smooth_ml_loss_2, ml_loss_2 = label_smoothed_cross_ent_loss(lprobs=F.log_softmax(scores[:, :ml_loss_timestep, :], dim=-1),
+            #                                                                 target=target[:, :ml_loss_timestep],
+            #                                                                 epsilon=loss_opts.get("epsilon", 0.0))
+            #     if ml_loss_2 - ml_loss > 5:
+            #         print(smooth_ml_loss, smooth_ml_loss_2)
+            #         print(ml_loss, ml_loss_2)
+            #         print()
+            #         embed()
 
         nll_lprobs = F.log_softmax(scores[:, ml_loss_timestep:, :], dim=-1)
         nll_target = target[:, ml_loss_timestep:]
 
-        epsilon = loss_opts.get("epsilon", 0.0)
+
         smooth_nll_loss, nll_loss = label_smoothed_cross_ent_loss(lprobs=nll_lprobs, target=nll_target,
                                                               epsilon=epsilon)
 
@@ -498,13 +521,15 @@ class MultiLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         task,
         multi_label_loss_type,
         label_smoothing,
-        ml_loss_timestep
+        ml_loss_timestep,
+        pos_score_thresh
 
     ):
         super().__init__(task)
         self.multi_label_loss_type  = multi_label_loss_type
         self.epsilon                = label_smoothing
         self.ml_loss_timestep       = ml_loss_timestep
+        self.pos_score_thresh       = None if pos_score_thresh < 0 else pos_score_thresh
 
     @classmethod
     def add_args(cls, parser):
@@ -527,6 +552,13 @@ class MultiLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
             default=1,
             type=int,
             help="Use multi-label loss for time step < ml_loss_timestep and nll loss thereafter",
+        )
+
+        parser.add_argument(
+            "--pos_score_thresh",
+            default=-1,
+            type=int,
+            help="Used to threshold pos scores in multi-label loss for time step < ml_loss_timestep",
         )
 
 
@@ -587,7 +619,7 @@ class MultiLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
         # lprobs, target = self.get_lprobs_and_target(model, net_output, sample)
         scores = self.get_scores(net_output=net_output)
         target = sample["target"]
-        # n_tgt_per_src = sample["target_per_src"]
+        n_tgt_per_src = sample["target_per_src"]
         # parallel_tgt_tokens_list_of_lists_wo_pad = sample["parallel_target_tokens_wo_pad"]
         # parallel_tgt_tokens_list_of_lists = sample["parallel_target_tokens"]
         parallel_tgt_tokens_list_of_lists = sample["parallel_target_tokens"]
@@ -597,7 +629,8 @@ class MultiLabelSmoothedCrossEntropyCriterion(FairseqCriterion):
                                                               target=target,
                                                               parallel_targets=parallel_tgt_tokens_list_of_lists,
                                                               ml_loss_timestep=self.ml_loss_timestep,
-                                                              epsilon=self.epsilon)
+                                                              epsilon=self.epsilon,
+                                                              pos_score_thresh=self.pos_score_thresh)
         loss, loss_wo_smooth, ml_loss, nll_loss = losses
         # start1 = time.time()
         # loss, loss_wo_smooth, ml_loss, nll_loss = hybrid_multi_label_loss_func(
