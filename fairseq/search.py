@@ -191,6 +191,15 @@ class PrefixConstrainedBeamSearch(Search):
             assert scores is not None
             lprobs = lprobs + scores[:, :, step - 1].unsqueeze(-1)
 
+        for curr_batch_idx in range(bsz):
+            if torch.isneginf(torch.max(lprobs[curr_batch_idx])): # if max score is negative inf for output corresponding this batch_idx
+                # All lprobs for curr_batch_idx are neg inf, so top-k might select things invalid tokens such as pad or bos os unk
+                # All values are neg-inf because none of the sequences in the beam are valid sequences as per self.prefix_allowed_tokens_fn
+                # So, we terminate this beam by selecting eos token for all sequences in the beam
+                # print(f"\n\n\nTerminate beam for batch id = {curr_batch_idx}\n\n\n")
+                lprobs[curr_batch_idx,:,self.eos] = -9999999999 # TODO: This value should be low enough that other valid hypothesis are not ruled out due to this
+
+
         top_prediction = torch.topk(
             lprobs.view(bsz, -1),
             k=min(
